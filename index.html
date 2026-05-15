@@ -318,7 +318,11 @@ body.sizing { user-select: none; cursor: col-resize; }
   <div class="ag-panel" id="agPanel" style="width:320px;">
     <div class="ag-hdr">
       <span class="ag-hdr-title">📋 Your Agenda</span>
-      <button class="ag-clear" onclick="clearAll()">Clear all</button>
+      <div style="display:flex;gap:4px;align-items:center;flex-shrink:0;">
+        <button class="ag-clear" onclick="showSyncKey()" title="See your sync key to use on other devices">🔗 Sync key</button>
+        <button class="ag-clear" onclick="changeSyncKey()" title="Enter a sync key from another device">↔ Change</button>
+        <button class="ag-clear" onclick="clearAll()">✕ Clear</button>
+      </div>
     </div>
     <div class="ag-scroll" id="agScroll">
       <div class="ag-empty" id="agEmpty">
@@ -397,6 +401,90 @@ rh.addEventListener('touchstart', e=>startResize(e.touches[0].clientX), {passive
 document.addEventListener('touchmove', e=>{ if(resizing) doResize(e.touches[0].clientX); }, {passive:true});
 document.addEventListener('touchend', endResize);
 
+// ─── FIREBASE SYNC ───────────────────────────────────────────
+// Uses a fixed user key stored in localStorage so the same browser
+// always maps to the same Firestore document, enabling cross-device
+// sync when you share/use the same userKey across devices.
+const LS_USERKEY = 'ai_summit_2026_userkey';
+
+function getUserKey() {
+  let k = localStorage.getItem(LS_USERKEY);
+  if (!k) { k = 'user_' + Math.random().toString(36).slice(2, 10); localStorage.setItem(LS_USERKEY, k); }
+  return k;
+}
+
+let db = null;
+let userKey = getUserKey();
+let syncUnsubscribe = null;
+
+function initFirebase() {
+  try {
+    const { initializeApp } = window.firebaseFns;
+    const { getFirestore, doc, setDoc, onSnapshot } = window.firestoreFns;
+
+    const app = initializeApp({
+      apiKey: "AIzaSyCWTvSSRiEJ93yDqFZmWIqLpVxEYJn2Czk",
+      authDomain: "ai-summit-agenda.firebaseapp.com",
+      projectId: "ai-summit-agenda",
+      storageBucket: "ai-summit-agenda.firebasestorage.app",
+      messagingSenderId: "112469248365",
+      appId: "1:112469248365:web:86565cf61f86bb9493f264"
+    });
+
+    db = getFirestore(app);
+
+    // Listen for real-time changes from Firestore
+    const docRef = doc(db, 'agendas', userKey);
+    syncUnsubscribe = onSnapshot(docRef, (snap) => {
+      if (snap.exists()) {
+        const ids = snap.data().sessions || [];
+        agenda = new Set(ids);
+        rebuildAgenda();
+        markBlocks();
+      }
+    }, (err) => {
+      console.warn('Firestore sync error:', err);
+    });
+  } catch(e) {
+    console.warn('Firebase init failed, falling back to localStorage:', e);
+  }
+}
+
+async function saveToFirebase() {
+  if (!db) { saveToLocalStorage(); return; }
+  try {
+    const { getFirestore, doc, setDoc } = window.firestoreFns;
+    const docRef = doc(db, 'agendas', userKey);
+    await setDoc(docRef, { sessions: [...agenda], updatedAt: new Date().toISOString() });
+  } catch(e) {
+    console.warn('Firebase save failed, using localStorage:', e);
+    saveToLocalStorage();
+  }
+}
+
+// Fallback localStorage
+function saveToLocalStorage() {
+  try { localStorage.setItem('ai_summit_2026_agenda', JSON.stringify([...agenda])); } catch(e) {}
+}
+
+// Show the sync key so users can use same key on other devices
+function showSyncKey() {
+  const msg = `Your sync key is:\n\n${userKey}\n\nTo sync on another device:\n1. Open the agenda on the other device\n2. Click "My Agenda" → "Change sync key"\n3. Enter this key`;
+  alert(msg);
+}
+
+function changeSyncKey() {
+  const newKey = prompt('Enter your sync key from another device:', userKey);
+  if (newKey && newKey.trim() && newKey.trim() !== userKey) {
+    if (syncUnsubscribe) syncUnsubscribe();
+    userKey = newKey.trim();
+    localStorage.setItem(LS_USERKEY, userKey);
+    agenda = new Set();
+    initFirebase();
+    toast('🔗 Syncing with new key...');
+  }
+}
+
 // ─── AGENDA OPS ─────────────────────────────────────────────
 function togglePanel() {
   panelOpen = !panelOpen;
@@ -405,10 +493,10 @@ function togglePanel() {
   document.getElementById('agBtn').classList.toggle('open', panelOpen);
 }
 
-function addSess(id) { agenda.add(id); rebuildAgenda(); markBlocks(); toast('✅ Added'); }
-function remSess(id) { agenda.delete(id); rebuildAgenda(); markBlocks(); toast('🗑️ Removed'); }
+function addSess(id) { agenda.add(id); saveToFirebase(); rebuildAgenda(); markBlocks(); toast('✅ Added'); }
+function remSess(id) { agenda.delete(id); saveToFirebase(); rebuildAgenda(); markBlocks(); toast('🗑️ Removed'); }
 function togSess(id) { agenda.has(id) ? remSess(id) : addSess(id); updModalBtn(id); }
-function clearAll() { if(!agenda.size)return; agenda.clear(); rebuildAgenda(); markBlocks(); toast('🗑️ Cleared'); }
+function clearAll() { if(!agenda.size)return; agenda.clear(); saveToFirebase(); rebuildAgenda(); markBlocks(); toast('🗑️ Cleared'); }
 
 function markBlocks() {
   document.querySelectorAll('.sb[data-id]').forEach(el => {
@@ -791,6 +879,25 @@ function toast(msg){
 // ─── INIT ────────────────────────────────────────────────────
 renderGrid();
 rebuildAgenda();
+// Firebase is initialised when the 'firebase-ready' event fires (see module script below)
+</script>
+
+<!-- Firebase SDKs (loaded as modules, bridged to window for use in main script) -->
+<script type="module">
+  import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
+  import { getFirestore, doc, setDoc, onSnapshot } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+  // Bridge to window so the non-module script can access them
+  window.firebaseFns   = { initializeApp };
+  window.firestoreFns  = { getFirestore, doc, setDoc, onSnapshot };
+  // Signal that Firebase is ready
+  window.dispatchEvent(new Event('firebase-ready'));
+</script>
+
+<script>
+  // Wait for Firebase module to load, then init
+  window.addEventListener('firebase-ready', () => {
+    initFirebase();
+  });
 </script>
 </body>
 </html>
